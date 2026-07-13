@@ -1,6 +1,6 @@
 # arbol-de-nodos
 
-Visualiza la topología de una mesh Meshtastic como un grafo de fuerzas, con la raíz (el nodo conectado por serial) anclada al borde izquierdo. Las rutas de **ida** y **vuelta** se resuelven y dibujan por separado, porque en Meshtastic pueden pasar por nodos distintos (ruteo asimétrico) — esto es intencional, no un bug, jajajajaj!
+Visualiza la topología de una malla de Meshtastic como un grafo de fuerzas, con la raíz (el nodo conectado por serial) anclada al borde izquierdo. Las rutas de **ida** y **vuelta** se resuelven y dibujan por separado, porque en Meshtastic pueden pasar por nodos distintos (ruteo asimétrico) — esto es intencional, no un bug, jajajajaj!
 
 Proyecto hermano de [mapa-mesh](https://github.com/TenoTrash/mapa-mesh), pero totalmente independiente: hardware propio, puerto serie propio, sin dependencia entre ambos.
 
