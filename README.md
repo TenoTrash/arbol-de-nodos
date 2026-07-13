@@ -13,7 +13,7 @@ Proyecto hermano de [mapa-mesh](https://github.com/TenoTrash/mapa-mesh), pero to
 ## Instalación
 
 ```bash
-git clone <URL-de-este-repo>
+git clone https://github.com/TenoTrash/arbol-de-nodos
 cd arbol-de-nodos
 python3 -m venv venv
 source venv/bin/activate
