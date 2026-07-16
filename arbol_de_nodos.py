@@ -74,7 +74,7 @@ log.info(f"Log guardado en: {_LOG_FILE}")
 #                                CONFIGURACION
 # =============================================================================
 
-SERIAL_PORT   = "/dev/ttyACM0"
+SERIAL_PORT   = "/dev/ttyUSB0"
 
 # Solo localhost: uso pensado para una sola persona mirando desde la misma
 # notebook durante un survey de campo. Si mas adelante hace falta ver esto
@@ -978,6 +978,10 @@ def index():
             style="position:absolute;right:12px;bottom:12px;font-size:12px;color:var(--text);
                    background:var(--surface);border:1px solid var(--border);border-radius:6px;
                    padding:6px 12px;cursor:pointer;font-family:var(--sans);">&#10021; Encuadrar todo</button>
+    <div id="neighbor-panel" style="position:absolute;top:12px;right:12px;width:250px;max-height:60vh;
+         overflow-y:auto;font-size:12px;color:var(--text);background:var(--surface);
+         border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:none;
+         font-family:var(--mono);"></div>
   </div>
 
   <div id="side">
@@ -1152,10 +1156,32 @@ function preferredParentId(nodeId) {{
   return null;
 }}
 
+// Mapa de vecinos compartido: nodeId -> Map(neighborId -> Set de direcciones
+// "fwd"/"back" que los conectan). Se recalcula UNA VEZ por actualizacion de
+// datos (mergeData) y de ahi lo reusan tanto las estadisticas del recuadro
+// como el panel de vecinos al hacer hover — recalcularlo en cada mousemove
+// seria tirar ciclos a la basura con 100+ nodos.
+function buildNeighborMap(routesArr) {{
+  const map = new Map();
+  function add(a, b, dir) {{
+    if (!map.has(a)) map.set(a, new Map());
+    const inner = map.get(a);
+    if (!inner.has(b)) inner.set(b, new Set());
+    inner.get(b).add(dir);
+  }}
+  for (const r of routesArr) {{
+    add(r.node_id, r.next_hop, r.direction);
+    add(r.next_hop, r.node_id, r.direction);
+  }}
+  return map;
+}}
+let neighborMapCache = new Map();
+
 function mergeData(nodesArr, routesArr, status) {{
   lastRoutes = routesArr;
   lastStatus = status;
   lastNodesArr = nodesArr;
+  neighborMapCache = buildNeighborMap(routesArr);
 
   const {{ w, h }} = treeWrapSize();
   const dmap = depthMap(nodesArr, routesArr);
@@ -1282,12 +1308,53 @@ function applyHover(d) {{
     for (let i = 0; i < seq.length - 1; i++) hoverLinkKeys.add(dir + ":" + seq[i]);
   }}
   refreshHighlight();
+  showNeighborPanel(d);
 }}
 
 function clearHover() {{
   hoverNodeIds = new Set();
   hoverLinkKeys = new Set();
   refreshHighlight();
+  hideNeighborPanel();
+}}
+
+// Panel "quien se conecta con este nodo" — separado del tooltip chico que
+// sigue al mouse porque un hub puede tener muchos vecinos y no entra comodo
+// ahi. Reusa neighborMapCache (armado una vez por actualizacion de datos,
+// no en cada movimiento del mouse).
+function showNeighborPanel(d) {{
+  const panel = document.getElementById("neighbor-panel");
+  const inner = neighborMapCache.get(d.node_id) || new Map();
+
+  if (inner.size === 0) {{
+    panel.style.display = "block";
+    panel.innerHTML = `<div style="font-weight:700;color:#fff;margin-bottom:4px">${{escapeHtml(d.short_name || d.node_id)}}</div>
+      <div style="color:var(--muted)">Sin conexiones resueltas todavia</div>`;
+    return;
+  }}
+
+  const rows = [...inner.entries()].map(([nid, dirs]) => {{
+    const n = nodeById.get(nid);
+    const name = n ? displayName(n) : nid;
+    const dirLabel = [...dirs].map(dr => dr === "fwd"
+      ? `<span style="color:var(--route-fwd)">ida</span>`
+      : `<span style="color:var(--route-back)">vuelta</span>`).join(" + ");
+    return `<div style="padding:4px 0;border-top:1px solid var(--border)">
+      <div>${{escapeHtml(name)}}</div>
+      <div style="font-size:10px">${{dirLabel}}</div>
+    </div>`;
+  }}).join("");
+
+  panel.style.display = "block";
+  panel.innerHTML = `
+    <div style="font-weight:700;color:#fff">${{escapeHtml(d.short_name || d.node_id)}}</div>
+    <div style="color:var(--muted);margin-bottom:2px">conectado con ${{inner.size}} nodo${{inner.size === 1 ? "" : "s"}}:</div>
+    ${{rows}}
+  `;
+}}
+
+function hideNeighborPanel() {{
+  document.getElementById("neighbor-panel").style.display = "none";
 }}
 
 let pinnedFromSidebar = null;
@@ -1464,24 +1531,15 @@ let searchQuery = "";
 // afuera solos, sin necesidad de chequear el rol explicitamente.
 function computeFunStats(nodesArr, routesArr) {{
   const rootId = lastStatus.root_id;
-  const neighborSets = new Map();
   const usedAsNextHop = new Set();
-  function addNeighbor(a, b) {{
-    if (!neighborSets.has(a)) neighborSets.set(a, new Set());
-    neighborSets.get(a).add(b);
-  }}
-  for (const r of routesArr) {{
-    addNeighbor(r.node_id, r.next_hop);
-    addNeighbor(r.next_hop, r.node_id);
-    usedAsNextHop.add(r.next_hop);
-  }}
+  for (const r of routesArr) usedAsNextHop.add(r.next_hop);
 
   const candidates = nodesArr.filter(n => n.node_id !== rootId);
   if (candidates.length === 0) return null;
 
   let maxConn = null, minConn = null, maxPkt = null, mostSilent = null;
   for (const n of candidates) {{
-    const deg = (neighborSets.get(n.node_id) || new Set()).size;
+    const deg = (neighborMapCache.get(n.node_id) || new Map()).size;
     if (maxConn === null || deg > maxConn.deg) maxConn = {{ n, deg }};
     // Solo entran al ranking de "menos conectado" los nodos que relayan
     // para alguien mas — descarta finales de malla / CLIENT_MUTE.
