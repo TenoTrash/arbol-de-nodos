@@ -74,7 +74,7 @@ log.info(f"Log guardado en: {_LOG_FILE}")
 #                                CONFIGURACION
 # =============================================================================
 
-SERIAL_PORT   = "/dev/ttyUSB0"
+SERIAL_PORT   = "/dev/ttyACM0"
 
 # Solo localhost: uso pensado para una sola persona mirando desde la misma
 # notebook durante un survey de campo. Si mas adelante hace falta ver esto
@@ -948,6 +948,13 @@ def index():
     #fit-all-btn:hover {{ border-color: var(--text); color: #fff; }}
     #node-search:focus {{ border-color: var(--accent); }}
 
+    .tsb-item {{ display: flex; flex-direction: column; gap: 4px; }}
+    .tsb-label {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }}
+    .tsb-value {{ font-size: 15px; font-weight: 700; color: #fff; font-family: var(--mono); }}
+    .tsb-hist-bar {{ background: var(--accent); border-radius: 1px; }}
+    .tsb-pie-legend div {{ display: flex; align-items: center; gap: 4px; white-space: nowrap; }}
+    .tsb-pie-legend .sw {{ width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }}
+
     .list-label {{ padding: 10px 16px 6px; font-size: 11px; color: var(--muted); text-transform: uppercase;
                    letter-spacing: .05em; flex-shrink: 0; }}
     #list {{ flex: 1; overflow-y: auto; padding: 0 8px 12px; }}
@@ -982,6 +989,9 @@ def index():
          overflow-y:auto;font-size:12px;color:var(--text);background:var(--surface);
          border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:none;
          font-family:var(--mono);"></div>
+    <div id="top-stats-bar" style="position:absolute;top:12px;left:12px;width:fit-content;max-width:calc(100% - 286px);
+         background:var(--surface);border:1px solid var(--border);border-radius:8px;
+         padding:8px 16px;display:none;flex-wrap:wrap;gap:22px;align-items:center;z-index:4;"></div>
   </div>
 
   <div id="side">
@@ -1161,6 +1171,102 @@ function preferredParentId(nodeId) {{
 // datos (mergeData) y de ahi lo reusan tanto las estadisticas del recuadro
 // como el panel de vecinos al hacer hover — recalcularlo en cada mousemove
 // seria tirar ciclos a la basura con 100+ nodos.
+// ── Histograma de profundidad ────────────────────────────────────────────────
+// Usa el mismo depthMap() que ya posiciona el grafo — un nodo sin ruta
+// resuelta (huerfano) no tiene profundidad conocida y queda afuera, igual
+// que ya queda afuera del dibujo del grafo.
+function computeDepthHistogram(nodesArr, routesArr) {{
+  const dmap = depthMap(nodesArr, routesArr);
+  const counts = new Map();
+  for (const n of nodesArr) {{
+    if (!dmap.has(n.node_id)) continue;
+    const d = dmap.get(n.node_id);
+    counts.set(d, (counts.get(d) || 0) + 1);
+  }}
+  return [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([depth, count]) => ({{ depth, count }}));
+}}
+
+// ── Porcentaje de asimetria ida/vuelta ───────────────────────────────────────
+// Solo cuentan los nodos que tienen AMBAS direcciones resueltas — si un nodo
+// solo tiene ida (o solo vuelta), no hay nada que comparar, no es "simetrico"
+// ni "asimetrico", es simplemente desconocido para esta metrica en particular.
+// "Asimetrico" = el proximo salto hacia la raiz difiere entre ida y vuelta.
+function computeAsymmetryStats(routesArr) {{
+  const fwdMap = new Map(routesArr.filter(r => r.direction === "fwd").map(r => [r.node_id, r.next_hop]));
+  const backMap = new Map(routesArr.filter(r => r.direction === "back").map(r => [r.node_id, r.next_hop]));
+  let both = 0, asym = 0;
+  for (const [nodeId, fwdNext] of fwdMap) {{
+    if (backMap.has(nodeId)) {{
+      both++;
+      if (backMap.get(nodeId) !== fwdNext) asym++;
+    }}
+  }}
+  return {{ both, asym, pct: both > 0 ? (asym / both * 100) : null }};
+}}
+
+// ── Distribucion de roles ────────────────────────────────────────────────────
+// La raiz queda afuera, igual que en el resto de las estadisticas — no es
+// parte de la "distribucion del mesh", es el punto de referencia.
+function computeRoleDistribution(nodesArr) {{
+  const rootId = lastStatus.root_id;
+  const counts = new Map();
+  for (const n of nodesArr) {{
+    if (n.node_id === rootId) continue;
+    const r = (n.role || "").toUpperCase();
+    counts.set(r, (counts.get(r) || 0) + 1);
+  }}
+  return counts;
+}}
+
+// ── Convex hull geografico (area aproximada en km2) ─────────────────────────
+// Mismo enfoque que ya usaban en mapa-mesh: proyeccion simple lat/lon -> km
+// usando 111 km/grado de latitud y 111*cos(lat_media) km/grado de longitud
+// (razonable para el area chica que cubre una mesh local, no para distancias
+// continentales). Se descartan coordenadas (0,0) sin fix real, no puntos
+// legitimos en la interseccion del ecuador con el meridiano de Greenwich.
+function convexHull(points) {{
+  const pts = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
+  if (pts.length < 3) return pts;
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [];
+  for (const p of pts) {{
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }}
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {{
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }}
+  upper.pop(); lower.pop();
+  return lower.concat(upper);
+}}
+
+function shoelaceArea(pts) {{
+  let area = 0;
+  for (let i = 0; i < pts.length; i++) {{
+    const j = (i + 1) % pts.length;
+    area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+  }}
+  return Math.abs(area) / 2;
+}}
+
+function computeHullAreaKm2(nodesArr) {{
+  const valid = nodesArr.filter(n => n.lat != null && n.lon != null && (Math.abs(n.lat) > 0.001 || Math.abs(n.lon) > 0.001));
+  if (valid.length < 3) return {{ area: null, count: valid.length }};
+  const latMean = valid.reduce((s, n) => s + n.lat, 0) / valid.length;
+  const kmPerDegLat = 111.0;
+  const kmPerDegLon = 111.0 * Math.cos(latMean * Math.PI / 180);
+  const projected = valid.map(n => ({{ x: n.lon * kmPerDegLon, y: n.lat * kmPerDegLat }}));
+  const hull = convexHull(projected);
+  return {{ area: shoelaceArea(hull), count: valid.length }};
+}}
+
+// Mapa de vecinos compartido: nodeId -> Map(neighborId -> Set de direcciones
+// "fwd"/"back" que los conectan). Se recalcula UNA VEZ por actualizacion de
+// datos (mergeData) y de ahi lo reusan tanto las estadisticas del recuadro
+// como el panel de vecinos al hacer hover.
 function buildNeighborMap(routesArr) {{
   const map = new Map();
   function add(a, b, dir) {{
@@ -1248,6 +1354,7 @@ function mergeData(nodesArr, routesArr, status) {{
   }}
 
   renderFunStats(nodesArr, routesArr);
+  renderTopStatsBar(nodesArr, routesArr);
 
   simNodes = [...nodeById.values()];
   simLinks = routesArr
@@ -1567,6 +1674,91 @@ function renderFunStats(nodesArr, routesArr) {{
     row("Más paquetes", s.maxPkt ? `${{escapeHtml(displayName(s.maxPkt.n))}} (${{s.maxPkt.pc}})` : "-") +
     row("Más silencioso", s.mostSilent ? `${{escapeHtml(displayName(s.mostSilent.n))}} (${{fmtAgo((Date.now()/1000) - s.mostSilent.n.last_seen)}})` : "-");
 }}
+
+const ROLE_PIE_COLORS = {{
+  "ROUTER":        "var(--router)",
+  "ROUTER_LATE":   "var(--router)",
+  "CLIENT_BASE":   "var(--base)",
+  "CLIENT_MUTE":   "#94a3b8",
+  "CLIENT_HIDDEN": "#c084fc",
+  "":              "var(--accent)",
+}};
+const ROLE_PIE_LABELS = {{
+  "ROUTER": "router", "ROUTER_LATE": "router_late", "CLIENT_BASE": "client_base",
+  "CLIENT_MUTE": "client_mute", "CLIENT_HIDDEN": "client_hidden", "": "cliente / sin dato",
+}};
+
+function renderTopStatsBar(nodesArr, routesArr) {{
+  const bar = document.getElementById("top-stats-bar");
+  const candidates = nodesArr.filter(n => n.node_id !== lastStatus.root_id);
+  if (candidates.length === 0) {{ bar.style.display = "none"; return; }}
+  bar.style.display = "flex";
+
+  // 1) Histograma de profundidad
+  const hist = computeDepthHistogram(nodesArr, routesArr);
+  const maxCount = Math.max(1, ...hist.map(h => h.count));
+  const histHtml = hist.map(h => `
+    <div class="tsb-hist-bar" title="${{h.depth}} saltos: ${{h.count}} nodos"
+         style="width:7px;height:${{Math.max(3, Math.round((h.count / maxCount) * 32))}}px;"></div>
+  `).join("");
+
+  // 2) Asimetria ida/vuelta
+  const asym = computeAsymmetryStats(routesArr);
+  const asymText = asym.pct === null ? "sin datos" : `${{asym.pct.toFixed(0)}}%`;
+  const asymCaption = asym.pct === null ? "ningun nodo con ambas direcciones" : `${{asym.asym}} de ${{asym.both}} nodos`;
+
+  // 3) Distribucion de roles (torta via conic-gradient)
+  const roleCounts = computeRoleDistribution(nodesArr);
+  const totalRoles = [...roleCounts.values()].reduce((a, b) => a + b, 0);
+  let pieCss = "var(--border)", legendHtml = `<div style="color:var(--muted)">sin datos</div>`;
+  if (totalRoles > 0) {{
+    let acc = 0;
+    const stops = [];
+    const legendRows = [];
+    for (const [role, count] of [...roleCounts.entries()].sort((a, b) => b[1] - a[1])) {{
+      if (count === 0) continue;
+      const color = ROLE_PIE_COLORS[role] ?? "var(--accent)";
+      const label = ROLE_PIE_LABELS[role] ?? role.toLowerCase();
+      const start = (acc / totalRoles) * 360;
+      acc += count;
+      const end = (acc / totalRoles) * 360;
+      stops.push(`${{color}} ${{start.toFixed(1)}}deg ${{end.toFixed(1)}}deg`);
+      legendRows.push(`<div><span class="sw" style="background:${{color}}"></span>${{escapeHtml(label)}} (${{count}})</div>`);
+    }}
+    pieCss = `conic-gradient(${{stops.join(", ")}})`;
+    legendHtml = legendRows.join("");
+  }}
+
+  // 4) Superficie geografica (convex hull aproximado)
+  const hull = computeHullAreaKm2(nodesArr);
+  const hullText = hull.area === null ? "sin datos" : `~${{hull.area.toFixed(0)}} km²`;
+  const hullCaption = `${{hull.count}} nodos con GPS`;
+
+  bar.innerHTML = `
+    <div class="tsb-item">
+      <div class="tsb-label">roles</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div style="width:34px;height:34px;border-radius:50%;flex-shrink:0;background:${{pieCss}}"></div>
+        <div class="tsb-pie-legend">${{legendHtml}}</div>
+      </div>
+    </div>
+    <div class="tsb-item">
+      <div class="tsb-label">profundidad</div>
+      <div style="display:flex;align-items:flex-end;gap:2px;height:34px;">${{histHtml}}</div>
+    </div>
+    <div class="tsb-item">
+      <div class="tsb-label">asimetria ida/vuelta</div>
+      <div class="tsb-value">${{asymText}}</div>
+      <div style="font-size:10px;color:var(--muted)">${{asymCaption}}</div>
+    </div>
+    <div class="tsb-item">
+      <div class="tsb-label">convex hull</div>
+      <div class="tsb-value">${{hullText}}</div>
+      <div style="font-size:10px;color:var(--muted)">${{hullCaption}}</div>
+    </div>
+  `;
+}}
+
 
 function renderList(nodesArr, status) {{
   const list = document.getElementById("list");
