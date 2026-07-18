@@ -74,7 +74,7 @@ log.info(f"Log guardado en: {_LOG_FILE}")
 #                                CONFIGURACION
 # =============================================================================
 
-SERIAL_PORT   = "/dev/ttyACM0"
+SERIAL_PORT   = "/dev/ttyUSB0"
 
 # Solo localhost: uso pensado para una sola persona mirando desde la misma
 # notebook durante un survey de campo. Si mas adelante hace falta ver esto
@@ -1254,13 +1254,73 @@ function shoelaceArea(pts) {{
 
 function computeHullAreaKm2(nodesArr) {{
   const valid = nodesArr.filter(n => n.lat != null && n.lon != null && (Math.abs(n.lat) > 0.001 || Math.abs(n.lon) > 0.001));
-  if (valid.length < 3) return {{ area: null, count: valid.length }};
+  if (valid.length < 3) return {{ area: null, count: valid.length, hull: null }};
   const latMean = valid.reduce((s, n) => s + n.lat, 0) / valid.length;
   const kmPerDegLat = 111.0;
   const kmPerDegLon = 111.0 * Math.cos(latMean * Math.PI / 180);
   const projected = valid.map(n => ({{ x: n.lon * kmPerDegLon, y: n.lat * kmPerDegLat }}));
   const hull = convexHull(projected);
-  return {{ area: shoelaceArea(hull), count: valid.length }};
+  // area y hull ya estaban calculados aca mismo; solo se agrega "hull" al
+  // objeto devuelto para que circularidad lo reuse sin recalcular nada.
+  return {{ area: shoelaceArea(hull), count: valid.length, hull }};
+}}
+
+// Perimetro del Convex Hull: NO recalcula el hull ni el area, recibe el
+// mismo poligono (en km proyectados) que ya devolvio computeHullAreaKm2.
+function computeHullPerimeterKm(hullPoints) {{
+  if (!hullPoints || hullPoints.length < 3) return null;
+  let perimeter = 0;
+  for (let i = 0; i < hullPoints.length; i++) {{
+    const j = (i + 1) % hullPoints.length;
+    const dx = hullPoints[j].x - hullPoints[i].x;
+    const dy = hullPoints[j].y - hullPoints[i].y;
+    perimeter += Math.sqrt(dx * dx + dy * dy);
+  }}
+  return perimeter;
+}}
+
+// Distancia real entre dos puntos (formula del semiverseno / haversine),
+// mas precisa que la proyeccion plana usada en el hull para un solo par de
+// puntos puntual (el hull la usa porque necesita un plano para el area de
+// un poligono entero; ac'a alcanza y sobra con la distancia exacta).
+function haversineKm(lat1, lon1, lat2, lon2) {{
+  const R = 6371; // radio de la Tierra en km
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}}
+
+// Enlace mas corto / mas largo entre dos nodos DIRECTAMENTE conectados con
+// GPS valido en ambos extremos. Usa neighborMapCache (ya deduplicado entre
+// ida/vuelta) para no contar el mismo par fisico dos veces. A diferencia
+// del resto de las estadisticas, ACA SI se incluye a la raiz — un enlace
+// suyo es un salto fisico real como cualquier otro, no un punto de
+// referencia a excluir.
+function computeLinkDistanceStats(nodesArr) {{
+  const byId = new Map(nodesArr.map(n => [n.node_id, n]));
+  const hasFix = n => n && n.lat != null && n.lon != null && (Math.abs(n.lat) > 0.001 || Math.abs(n.lon) > 0.001);
+
+  let shortest = null, longest = null;
+  const seenPairs = new Set();
+  for (const [nodeId, neighbors] of neighborMapCache.entries()) {{
+    const a = byId.get(nodeId);
+    if (!hasFix(a)) continue;
+    for (const neighborId of neighbors.keys()) {{
+      const pairKey = [nodeId, neighborId].sort().join("|");
+      if (seenPairs.has(pairKey)) continue;
+      seenPairs.add(pairKey);
+      const b = byId.get(neighborId);
+      if (!hasFix(b)) continue;
+      const dist = haversineKm(a.lat, a.lon, b.lat, b.lon);
+      const entry = {{ a, b, dist }};
+      if (shortest === null || dist < shortest.dist) shortest = entry;
+      if (longest === null || dist > longest.dist) longest = entry;
+    }}
+  }}
+  return {{ shortest, longest }};
 }}
 
 // Mapa de vecinos compartido: nodeId -> Map(neighborId -> Set de direcciones
@@ -1734,6 +1794,21 @@ function renderTopStatsBar(nodesArr, routesArr) {{
   const hullText = hull.area === null ? "sin datos" : `~${{hull.area.toFixed(0)}} km²`;
   const hullCaption = `${{hull.count}} nodos con GPS`;
 
+  // Circularidad = 4*pi*Area / Perimetro^2, reutilizando el area (hull.area)
+  // y el poligono (hull.hull) que ya devolvio computeHullAreaKm2 -- no se
+  // recalcula ni el hull ni el area en ningun lado de esto.
+  const hullPerimeter = computeHullPerimeterKm(hull.hull);
+  const circularity = (hull.area !== null && hullPerimeter) ? (4 * Math.PI * hull.area) / (hullPerimeter * hullPerimeter) : null;
+  const circularityText = circularity === null ? "sin datos" : circularity.toFixed(3);
+  const circularityTooltip = "Índice de circularidad del Convex Hull (4\u03c0A/P\u00b2). Cuanto más cercano a 1, más compacta es la cobertura.";
+
+  // 5) Enlace mas corto / mas largo (distancia real entre dos nodos con GPS
+  // directamente conectados)
+  const links = computeLinkDistanceStats(nodesArr);
+  const fmtLink = (entry) => entry
+    ? `${{entry.dist.toFixed(entry.dist < 10 ? 2 : 1)}}km ${{escapeHtml(entry.a.short_name || entry.a.node_id)}} <---> ${{escapeHtml(entry.b.short_name || entry.b.node_id)}}`
+    : "sin datos";
+
   bar.innerHTML = `
     <div class="tsb-item">
       <div class="tsb-label">roles</div>
@@ -1755,6 +1830,16 @@ function renderTopStatsBar(nodesArr, routesArr) {{
       <div class="tsb-label">convex hull</div>
       <div class="tsb-value">${{hullText}}</div>
       <div style="font-size:10px;color:var(--muted)">${{hullCaption}}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px" title="${{circularityTooltip}}">Circularidad: <span style="color:#fff;font-weight:700">${{circularityText}}</span></div>
+    </div>
+    <div class="tsb-item">
+      <div class="tsb-label">Distancias (GPS)</div>
+      <div style="font-size:11px;line-height:1.4;">
+        <div style="color:var(--muted)">Más corto:</div>
+        <div>${{fmtLink(links.shortest)}}</div>
+        <div style="color:var(--muted);margin-top:4px">Más largo:</div>
+        <div>${{fmtLink(links.longest)}}</div>
+      </div>
     </div>
   `;
 }}
