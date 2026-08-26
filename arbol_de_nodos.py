@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-# arbol-de-nodos — v0.2
+# arbol-de-nodos — v0.3
 #
 # Muestra la topologia del mesh como GRAFO DE FUERZAS (no arbol estricto),
 # con raiz anclada al borde izquierdo. Se abandono d3.stratify()/d3.tree()
@@ -74,7 +74,7 @@ log.info(f"Log guardado en: {_LOG_FILE}")
 #                                CONFIGURACION
 # =============================================================================
 
-SERIAL_PORT   = "/dev/ttyUSB0"
+SERIAL_PORT   = "/dev/ttyACM0"
 
 # Solo localhost: uso pensado para una sola persona mirando desde la misma
 # notebook durante un survey de campo. Si mas adelante hace falta ver esto
@@ -901,11 +901,12 @@ def index():
     .link-fwd.highlight, .link-back.highlight {{ stroke-width: 4.5px; opacity: 1; }}
     .link-fwd.dimmed, .link-back.dimmed {{ opacity: .1; }}
 
-    .node circle.main {{ stroke: var(--bg); stroke-width: 2px; }}
-    .node circle.pending-ring {{ fill: none; stroke: var(--pending-ring); stroke-width: 1.6px; stroke-dasharray: 3 2; }}
-    .node text   {{ fill: var(--text); font-size: 11px; font-family: var(--sans); }}
-    .node text.root-label {{ font-weight: 700; fill: #fff; font-size: 12px; }}
-    .node.highlight circle.main {{ stroke: var(--accent); stroke-width: 3px; }}
+    .node rect.main {{ stroke: var(--bg); stroke-width: 2px; }}
+    .node rect.pending-ring {{ fill: none; stroke: var(--pending-ring); stroke-width: 1.6px; stroke-dasharray: 3 2; }}
+    .node text   {{ fill: var(--bg); font-size: 10px; font-weight: 600; font-family: var(--sans);
+                    pointer-events: none; }}
+    .node text.root-label {{ font-weight: 700; font-size: 11px; }}
+    .node.highlight rect.main {{ stroke: var(--accent); stroke-width: 3px; }}
     .node.dimmed {{ opacity: .2; }}
 
     #tooltip {{
@@ -991,7 +992,11 @@ def index():
          font-family:var(--mono);"></div>
     <div id="top-stats-bar" style="position:absolute;top:12px;left:12px;width:fit-content;max-width:calc(100% - 286px);
          background:var(--surface);border:1px solid var(--border);border-radius:8px;
-         padding:8px 16px;display:none;flex-wrap:wrap;gap:22px;align-items:center;z-index:4;"></div>
+         padding:12px 30px 8px 16px;display:none;flex-wrap:wrap;gap:22px;align-items:center;z-index:4;"></div>
+    <button id="tsb-reopen-btn" title="Mostrar estadísticas"
+            style="position:absolute;top:12px;left:12px;font-size:11px;color:var(--muted);
+                   background:var(--surface);border:1px solid var(--border);border-radius:6px;
+                   padding:6px 12px;cursor:pointer;display:none;z-index:4;font-family:var(--sans);">&#9662; estadísticas</button>
   </div>
 
   <div id="side">
@@ -1083,6 +1088,19 @@ function isPending(node) {{
   return !!node.traceroute_pending;
 }}
 
+// Nombre corto (o el ID si no hay) que se dibuja DENTRO de cada nodo.
+function nodeLabelText(d) {{
+  const sn = (d.short_name || "").trim();
+  return (sn || d.node_id).slice(0, 14);
+}}
+
+// Ancho del rectangulo segun largo del nombre, para que el texto entre.
+function nodeRectWidth(d) {{
+  const len = nodeLabelText(d).length;
+  const min = d.is_root ? 48 : 38;
+  return Math.max(min, len * 7 + (d.is_root ? 18 : 14));
+}}
+
 // Nombre largo (corto) para la barra lateral; si falta uno de los dos, cae al que haya.
 function displayName(n) {{
   const ln = (n.long_name || "").trim();
@@ -1147,7 +1165,7 @@ function ensureSim() {{
   sim = d3.forceSimulation()
     .force("link", d3.forceLink().id(d => d.node_id).distance(75).strength(0.35))
     .force("charge", d3.forceManyBody().strength(-220))
-    .force("collide", d3.forceCollide().radius(d => d.is_root ? 22 : 16))
+    .force("collide", d3.forceCollide().radius(d => nodeRectWidth(d) / 2 + 6))
     .force("y", d3.forceY(d => d._targetY ?? treeWrapSize().h / 2).strength(0.28))
     .alphaDecay(0.03)
     .on("tick", ticked);
@@ -1596,16 +1614,19 @@ function ticked() {{
   const nodeEnter = nodeSel.enter().append("g").attr("class", "node")
     .on("mousemove", (ev, d) => {{ showTooltip(ev, d); applyHover(d); }})
     .on("mouseleave", () => {{ hideTooltip(); clearHover(); }});
-  nodeEnter.append("circle").attr("class", "main");
-  nodeEnter.append("circle").attr("class", "pending-ring");
-  nodeEnter.append("text").attr("text-anchor", "middle");
+  nodeEnter.append("rect").attr("class", "main").attr("rx", 6).attr("ry", 6);
+  nodeEnter.append("rect").attr("class", "pending-ring").attr("rx", 9).attr("ry", 9);
+  nodeEnter.append("text").attr("text-anchor", "middle").attr("dy", "0.32em");
 
   const merged = nodeEnter.merge(nodeSel);
   merged.attr("class", "node")
         .attr("transform", d => `translate(${{d.x}},${{d.y}})`);
 
-  merged.select("circle.main")
-    .attr("r", d => d.is_root ? 16 : 10)
+  merged.select("rect.main")
+    .attr("width",  d => nodeRectWidth(d))
+    .attr("height", d => d.is_root ? 30 : 24)
+    .attr("x", d => -nodeRectWidth(d) / 2)
+    .attr("y", d => d.is_root ? -15 : -12)
     .attr("fill", d => {{
       const cls = dotClass(d);
       if (cls === "root") return "var(--root)";
@@ -1617,14 +1638,17 @@ function ticked() {{
   // Anillo punteado independiente del color de rol: "estoy re-chequeando
   // este nodo ahora" es un ESTADO transitorio, no una propiedad del nodo,
   // asi que no deberia competir por el mismo canal de color que el rol.
-  merged.select("circle.pending-ring")
-    .attr("r", d => (d.is_root ? 16 : 10) + 4)
+  merged.select("rect.pending-ring")
+    .attr("width",  d => nodeRectWidth(d) + 8)
+    .attr("height", d => (d.is_root ? 30 : 24) + 8)
+    .attr("x", d => -(nodeRectWidth(d) + 8) / 2)
+    .attr("y", d => (d.is_root ? -15 : -12) - 4)
     .style("display", d => isPending(d) ? null : "none");
 
+  // Nombre corto DENTRO del nodo, no hay label aparte por fuera.
   merged.select("text")
     .attr("class", d => d.is_root ? "root-label" : "")
-    .attr("dy", d => d.is_root ? "-1.6em" : "1.9em")
-    .text(d => (d.short_name || d.node_id).slice(0, 14));
+    .text(d => nodeLabelText(d));
 
   refreshHighlight();
 
@@ -1748,11 +1772,27 @@ const ROLE_PIE_LABELS = {{
   "CLIENT_MUTE": "client_mute", "CLIENT_HIDDEN": "client_hidden", "": "cliente / sin dato",
 }};
 
+let statsBarCollapsed = false;
+
+function setStatsBarCollapsed(collapsed) {{
+  statsBarCollapsed = collapsed;
+  document.getElementById("top-stats-bar").style.display = collapsed ? "none" : "flex";
+  document.getElementById("tsb-reopen-btn").style.display = collapsed ? "block" : "none";
+}}
+document.getElementById("tsb-reopen-btn").addEventListener("click", () => setStatsBarCollapsed(false));
+
 function renderTopStatsBar(nodesArr, routesArr) {{
   const bar = document.getElementById("top-stats-bar");
   const candidates = nodesArr.filter(n => n.node_id !== lastStatus.root_id);
-  if (candidates.length === 0) {{ bar.style.display = "none"; return; }}
-  bar.style.display = "flex";
+  if (candidates.length === 0) {{
+    bar.style.display = "none";
+    document.getElementById("tsb-reopen-btn").style.display = "none";
+    return;
+  }}
+  // El calculo de abajo se hace igual este colapsada o no, para que al
+  // reabrirla ya este actualizada — solo cambia si se MUESTRA o no.
+  bar.style.display = statsBarCollapsed ? "none" : "flex";
+  document.getElementById("tsb-reopen-btn").style.display = statsBarCollapsed ? "block" : "none";
 
   // 1) Histograma de profundidad
   const hist = computeDepthHistogram(nodesArr, routesArr);
@@ -1810,6 +1850,9 @@ function renderTopStatsBar(nodesArr, routesArr) {{
     : "sin datos";
 
   bar.innerHTML = `
+    <button id="tsb-close-btn" title="Ocultar estadísticas"
+            style="position:absolute;top:2px;right:4px;background:none;border:none;color:var(--muted);
+                   cursor:pointer;font-size:13px;line-height:1;padding:3px 6px;font-family:var(--sans);">&#10005;</button>
     <div class="tsb-item">
       <div class="tsb-label">roles</div>
       <div style="display:flex;align-items:center;gap:8px;">
@@ -1842,6 +1885,7 @@ function renderTopStatsBar(nodesArr, routesArr) {{
       </div>
     </div>
   `;
+  document.getElementById("tsb-close-btn").addEventListener("click", () => setStatsBarCollapsed(true));
 }}
 
 
