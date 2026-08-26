@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-# arbol-de-nodos — v0.3
+# arbol-de-nodos — v0.4
 #
 # Muestra la topologia del mesh como GRAFO DE FUERZAS (no arbol estricto),
 # con raiz anclada al borde izquierdo. Se abandono d3.stratify()/d3.tree()
@@ -74,7 +74,7 @@ log.info(f"Log guardado en: {_LOG_FILE}")
 #                                CONFIGURACION
 # =============================================================================
 
-SERIAL_PORT   = "/dev/ttyACM0"
+SERIAL_PORT   = "/dev/ttyUSB0"
 
 # Solo localhost: uso pensado para una sola persona mirando desde la misma
 # notebook durante un survey de campo. Si mas adelante hace falta ver esto
@@ -947,6 +947,7 @@ def index():
            border-radius: 4px; padding: 2px 8px; white-space: nowrap; transition: color .15s, border-color .15s; }}
     .dl:hover {{ color: var(--text); border-color: var(--text); }}
     #fit-all-btn:hover {{ border-color: var(--text); color: #fff; }}
+    #rotate-btn:hover {{ border-color: var(--text); color: #fff; }}
     #node-search:focus {{ border-color: var(--accent); }}
 
     .tsb-item {{ display: flex; flex-direction: column; gap: 4px; }}
@@ -986,6 +987,10 @@ def index():
             style="position:absolute;right:12px;bottom:12px;font-size:12px;color:var(--text);
                    background:var(--surface);border:1px solid var(--border);border-radius:6px;
                    padding:6px 12px;cursor:pointer;font-family:var(--sans);">&#10021; Encuadrar todo</button>
+    <button id="rotate-btn" title="Rotar el arbol 90 grados (raiz arriba) / volver a la vista original"
+            style="position:absolute;right:12px;bottom:48px;font-size:12px;color:var(--text);
+                   background:var(--surface);border:1px solid var(--border);border-radius:6px;
+                   padding:6px 12px;cursor:pointer;font-family:var(--sans);">&#8635; Rotar 90&deg;</button>
     <div id="neighbor-panel" style="position:absolute;top:12px;right:12px;width:250px;max-height:60vh;
          overflow-y:auto;font-size:12px;color:var(--text);background:var(--surface);
          border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:none;
@@ -1133,6 +1138,13 @@ let lastRoutes = [];
 let lastStatus = {{}};
 let lastNodesArr = [];
 
+// "horizontal" (default): raiz a la izquierda, la profundidad crece hacia
+// la derecha (eje X fijo por hop_index, eje Y libre). "vertical": raiz
+// arriba, la profundidad crece hacia abajo (eje Y fijo, eje X libre) — es
+// el mismo layout de fuerzas, solo se intercambia cual eje queda fijo por
+// profundidad y cual queda libre siguiendo al padre. Ver mergeData().
+let orientation = "horizontal";
+
 function treeWrapSize() {{
   const el = document.getElementById("tree-wrap");
   return {{ w: el.clientWidth || 800, h: el.clientHeight || 600 }};
@@ -1151,22 +1163,33 @@ function depthMap(nodesArr, routesArr) {{
 
 function ensureSim() {{
   if (sim) return sim;
-  // Nota: a proposito NO hay force("x", ...). La posicion horizontal se fija
-  // "a mano" (node.fx) segun profundidad en mergeData() — eso es lo que
-  // garantiza raiz-a-la-izquierda-todo-crece-a-la-derecha de forma estricta,
-  // en vez de una tendencia suave que otras fuerzas podian contrarrestar.
+  // Nota: a proposito NO hay force("x"/"y", ...) puras sin condicion. La
+  // posicion en el eje de profundidad (X si orientation="horizontal", Y si
+  // "vertical") se fija "a mano" (node.fx/fy) segun hop_index en
+  // mergeData() — eso es lo que garantiza raiz-al-borde-todo-crece-hacia-
+  // el-otro-lado de forma estricta, en vez de una tendencia suave que otras
+  // fuerzas podian contrarrestar.
   //
-  // El eje Y en cambio tira hacia _targetY (el Y actual del padre en la ruta
-  // de ida, calculado en mergeData) en vez de un centro fijo comun a todos.
-  // Eso agrupa a los hijos de un mismo nodo cerca de su altura, en vez de
-  // esparcidos al azar por toda la columna — es lo que evita el zigzag al
-  // resaltar un camino: cuantos menos saltos verticales grandes, mas prolija
-  // se ve la linea resaltada.
+  // El eje libre en cambio tira hacia _targetCross (la posicion actual del
+  // padre en ese eje, calculada en mergeData) en vez de un centro fijo
+  // comun a todos. Eso agrupa a los hijos de un mismo nodo cerca de la
+  // posicion de su padre, en vez de esparcidos al azar por toda la columna
+  // — es lo que evita el zigzag al resaltar un camino: cuantos menos saltos
+  // grandes en el eje libre, mas prolija se ve la linea resaltada.
+  //
+  // Dos fuerzas de "eje libre" (una para X, una para Y), ambas apuntando al
+  // mismo _targetCross (el Y o X actual del padre, segun orientacion). Solo
+  // una de las dos hace algo en cada momento: la del eje que NO tiene fx/fy
+  // fijo es la que mueve al nodo; la del otro eje es inofensiva porque el
+  // propio d3-force sobreescribe esa coordenada con fx/fy en cada tick,
+  // pase lo que pase con las fuerzas. Esto permite togglear "orientation"
+  // sin tener que reconstruir la simulacion.
   sim = d3.forceSimulation()
     .force("link", d3.forceLink().id(d => d.node_id).distance(75).strength(0.35))
     .force("charge", d3.forceManyBody().strength(-220))
     .force("collide", d3.forceCollide().radius(d => nodeRectWidth(d) / 2 + 6))
-    .force("y", d3.forceY(d => d._targetY ?? treeWrapSize().h / 2).strength(0.28))
+    .force("crossY", d3.forceY(d => d._targetCross ?? treeWrapSize().h / 2).strength(0.28))
+    .force("crossX", d3.forceX(d => d._targetCross ?? treeWrapSize().w / 2).strength(0.28))
     .alphaDecay(0.03)
     .on("tick", ticked);
   return sim;
@@ -1372,6 +1395,13 @@ function mergeData(nodesArr, routesArr, status) {{
   const seen = new Set();
   let orphanCount = 0;
 
+  // Segun orientacion: "horizontal" fija X por profundidad (raiz izquierda,
+  // libre en Y); "vertical" fija Y por profundidad (raiz arriba, libre en
+  // X). depthLimit/crossCenter se calculan sobre el eje que corresponda.
+  const horiz = orientation === "horizontal";
+  const depthLimit = horiz ? w : h;
+  const crossCenter = horiz ? h / 2 : w / 2;
+
   for (const n of nodesArr) {{
     // Sin ruta resuelta (ni ida ni vuelta) y no es la raiz: no aporta
     // ninguna arista al grafo de topologia, no entra. Sigue estando en
@@ -1383,40 +1413,53 @@ function mergeData(nodesArr, routesArr, status) {{
 
     seen.add(n.node_id);
     const depth = dmap.get(n.node_id) ?? 0;
-    // fx FIJO (no una fuerza blanda): esto es lo que hace la posicion
-    // horizontal obligatoria por profundidad, no solo "preferida".
-    const fixedX = Math.min(70 + depth * 95, w - 60);
+    // Coordenada FIJA (no una fuerza blanda): esto es lo que hace la
+    // posicion por profundidad obligatoria, no solo "preferida".
+    const fixedDepth = Math.min(70 + depth * 95, depthLimit - 60);
 
     let obj = nodeById.get(n.node_id);
     if (!obj) {{
-      // Nodo nuevo: arranca cerca del Y actual de su padre (si ya lo
-      // conocemos) en vez de un salto aleatorio por toda la columna —
-      // menos "acomodo caotico" antes de que la fuerza lo asiente.
+      // Nodo nuevo: arranca cerca de la posicion actual de su padre en el
+      // eje libre (si ya lo conocemos) en vez de un salto aleatorio por
+      // toda la columna — menos "acomodo caotico" antes de que la fuerza
+      // lo asiente.
       const parentId = n.is_root ? null : preferredParentId(n.node_id);
       const parentObj = parentId ? nodeById.get(parentId) : null;
-      const baseY = parentObj ? parentObj.y : h / 2;
+      const baseCross = parentObj ? (horiz ? parentObj.y : parentObj.x) : crossCenter;
+      const cross = n.is_root ? crossCenter : (baseCross + (Math.random() - 0.5) * 40);
       obj = {{ ...n }};
-      obj.x = fixedX;
-      obj.fx = fixedX;
-      obj.y = n.is_root ? h / 2 : (baseY + (Math.random() - 0.5) * 40);
-      if (n.is_root) obj.fy = h / 2;
+      if (horiz) {{
+        obj.x = fixedDepth; obj.fx = fixedDepth;
+        obj.y = cross;
+        if (n.is_root) obj.fy = crossCenter;
+      }} else {{
+        obj.y = fixedDepth; obj.fy = fixedDepth;
+        obj.x = cross;
+        if (n.is_root) obj.fx = crossCenter;
+      }}
       nodeById.set(n.node_id, obj);
     }} else {{
       Object.assign(obj, n);
-      obj.fx = fixedX;
-      if (n.is_root && obj.fy === undefined) obj.fy = h / 2;
+      if (horiz) {{
+        obj.fx = fixedDepth;
+        if (n.is_root) {{ if (obj.fy === undefined) obj.fy = crossCenter; }} else obj.fy = undefined;
+      }} else {{
+        obj.fy = fixedDepth;
+        if (n.is_root) {{ if (obj.fx === undefined) obj.fx = crossCenter; }} else obj.fx = undefined;
+      }}
     }}
     obj._depth = depth;
   }}
 
   // Segunda pasada: ahora que todos los objetos existen, calcular hacia
-  // donde tira el force("y") de cada uno (el Y actual de su padre).
+  // donde tira la fuerza del eje libre de cada uno (la posicion actual del
+  // padre en ese eje).
   for (const n of nodesArr) {{
     if (n.is_root || !seen.has(n.node_id)) continue;
     const obj = nodeById.get(n.node_id);
     const parentId = preferredParentId(n.node_id);
     const parentObj = parentId ? nodeById.get(parentId) : null;
-    obj._targetY = parentObj ? parentObj.y : h / 2;
+    obj._targetCross = parentObj ? (horiz ? parentObj.y : parentObj.x) : crossCenter;
   }}
 
   for (const id of [...nodeById.keys()]) {{
@@ -1586,17 +1629,20 @@ function refreshHighlight() {{
 }}
 
 function ticked() {{
-  // Clamp duro: ningun nodo puede quedar mas a la izquierda que el minimo
-  // de su columna de profundidad. El forceX ya empuja hacia ahi, pero es
-  // debil frente a la carga/enlaces — esto es lo que convierte "tiende a"
-  // en "no puede no". Se cancela la velocidad negativa para no generar
-  // temblor por el choque entre el clamp y la simulacion.
-  const {{ w }} = treeWrapSize();
+  // Clamp duro: ningun nodo puede quedar "antes" (en el eje de profundidad
+  // segun orientacion) que el minimo de su columna de profundidad. La
+  // fuerza fx/fy ya empuja hacia ahi, pero esto es lo que convierte
+  // "tiende a" en "no puede no". Se cancela la velocidad negativa para no
+  // generar temblor por el choque entre el clamp y la simulacion.
+  const {{ w, h }} = treeWrapSize();
+  const horiz = orientation === "horizontal";
+  const depthLimit = horiz ? w : h;
   for (const d of simNodes) {{
-    const minX = d.is_root ? 70 : Math.min(70 + (d._depth ?? 5) * 95, w - 60);
-    if (d.x < minX) {{
-      d.x = minX;
-      if (d.vx < 0) d.vx = 0;
+    const minDepth = d.is_root ? 70 : Math.min(70 + (d._depth ?? 5) * 95, depthLimit - 60);
+    if (horiz) {{
+      if (d.x < minDepth) {{ d.x = minDepth; if (d.vx < 0) d.vx = 0; }}
+    }} else {{
+      if (d.y < minDepth) {{ d.y = minDepth; if (d.vy < 0) d.vy = 0; }}
     }}
   }}
 
@@ -1654,8 +1700,9 @@ function ticked() {{
 
   if (!didInitialCenter && simNodes.length) {{
     didInitialCenter = true;
-    const {{ w }} = treeWrapSize();
-    svg.call(zoom.transform, d3.zoomIdentity.translate(40, 0).scale(1));
+    const tx = orientation === "horizontal" ? 40 : 0;
+    const ty = orientation === "horizontal" ? 0 : 40;
+    svg.call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(1));
   }}
 }}
 
@@ -1920,19 +1967,41 @@ function renderList(nodesArr, status) {{
   }}
 }}
 
-function fitAll() {{
+// zoomFactor < 1 deja el encuadre levemente mas "alejado" que el ajuste
+// exacto (por ejemplo, al recentrar despues de rotar el arbol).
+function fitAll(zoomFactor = 1) {{
   if (simNodes.length === 0) return;
   const {{ w, h }} = treeWrapSize();
   const xs = simNodes.map(d => d.x), ys = simNodes.map(d => d.y);
   const pad = 50;
   const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
   const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
-  const scale = Math.min(3, Math.max(0.2, Math.min(w / (maxX - minX || 1), h / (maxY - minY || 1))));
+  const scale = Math.min(3, Math.max(0.2, Math.min(w / (maxX - minX || 1), h / (maxY - minY || 1)))) * zoomFactor;
   const midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
   const transform = d3.zoomIdentity.translate(w / 2 - midX * scale, h / 2 - midY * scale).scale(scale);
   svg.transition().duration(500).call(zoom.transform, transform);
 }}
 document.getElementById("fit-all-btn").addEventListener("click", fitAll);
+
+// Alterna entre el layout horizontal (raiz a la izquierda, por defecto) y
+// vertical (raiz arriba, arbol rotado 90 grados). Reusa mergeData() sobre
+// los ultimos datos conocidos para reasignar fx/fy de todos los nodos ya
+// existentes al nuevo eje, y deja que la simulacion los reacomode.
+const rotateBtn = document.getElementById("rotate-btn");
+function updateRotateBtnLabel() {{
+  rotateBtn.innerHTML = orientation === "horizontal"
+    ? "&#8635; Rotar 90&deg;"
+    : "&#8634; Vista original";
+}}
+function toggleOrientation() {{
+  orientation = orientation === "horizontal" ? "vertical" : "horizontal";
+  updateRotateBtnLabel();
+  if (lastNodesArr.length) {{
+    mergeData(lastNodesArr, lastRoutes, lastStatus);
+    setTimeout(() => fitAll(0.85), 350);
+  }}
+}}
+rotateBtn.addEventListener("click", toggleOrientation);
 document.getElementById("node-search").addEventListener("input", (ev) => {{
   searchQuery = ev.target.value;
   renderList(lastNodesArr, lastStatus);
