@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-# arbol-de-nodos — v0.4
+# arbol-de-nodos — v0.2
 #
 # Muestra la topologia del mesh como GRAFO DE FUERZAS (no arbol estricto),
 # con raiz anclada al borde izquierdo. Se abandono d3.stratify()/d3.tree()
@@ -49,7 +49,7 @@ from flask_socketio import SocketIO
 from pubsub import pub
 
 import meshtastic.serial_interface
-from meshtastic.protobuf import mesh_pb2, portnums_pb2
+from meshtastic.protobuf import mesh_pb2, portnums_pb2, config_pb2
 
 # =============================================================================
 #                                   LOGGING
@@ -74,7 +74,7 @@ log.info(f"Log guardado en: {_LOG_FILE}")
 #                                CONFIGURACION
 # =============================================================================
 
-SERIAL_PORT   = "/dev/ttyUSB0"
+SERIAL_PORT   = "/dev/ttyACM0"
 
 # Solo localhost: uso pensado para una sola persona mirando desde la misma
 # notebook durante un survey de campo. Si mas adelante hace falta ver esto
@@ -168,6 +168,9 @@ state_lock     = threading.Lock()
 last_packet_ts = 0.0
 connected      = False
 last_error     = ""
+
+# Region LoRa leida del dispositivo (para mostrarla en la UI y en el export PNG)
+LORA_REGION: Optional[str] = None
 
 ROOT_ID: Optional[str] = None   # se completa al conectar, formato "!xxxxxxxx"
 
@@ -322,6 +325,7 @@ def get_status() -> dict:
         "resolved_routes":     resolved,
         "orphans":             orphans,
         "avg_snr":             avg_snr,
+        "lora_region":         LORA_REGION,
     }
 
 
@@ -589,7 +593,7 @@ def on_connection_changed(is_connected: bool):
 # =============================================================================
 
 def meshtastic_thread():
-    global iface_ref, last_error, ROOT_ID
+    global iface_ref, last_error, ROOT_ID, LORA_REGION
 
     while True:
         try:
@@ -602,6 +606,15 @@ def meshtastic_thread():
 
             with iface_lock:
                 iface_ref = iface
+
+            # Leer la region LoRa del dispositivo (una sola vez al conectar).
+            try:
+                region_code = iface.localNode.localConfig.lora.region
+                LORA_REGION = config_pb2.Config.LoRaConfig.RegionCode.Name(region_code)
+                log.info(f"Region LoRa: {LORA_REGION}")
+            except Exception as e:
+                log.warning(f"No se pudo leer la region LoRa: {e}")
+                LORA_REGION = None
 
             # Identificar la raiz: el propio nodo conectado
             my_num = iface.myInfo.my_node_num
@@ -857,6 +870,30 @@ def api_tree():
     return jsonify({"status": get_status(), "nodes": serialize_nodes(), "routes": serialize_routes()})
 
 
+@app.get("/export/mapa.png")
+def export_mapa_png():
+    """Exporta el mapa a PNG (plano A3) renderizado en el servidor."""
+    try:
+        import export_png
+    except Exception as e:
+        log.error(f"No se pudo importar export_png: {e}")
+        return Response("Modulo de exportacion no disponible.", status=500)
+
+    try:
+        png_bytes = export_png.render_export_png(
+            serialize_nodes(), serialize_routes(), get_status()
+        )
+    except Exception as e:
+        log.error(f"Error exportando PNG: {e}", exc_info=True)
+        return Response(f"Error exportando PNG: {e}", status=500)
+
+    return Response(
+        png_bytes,
+        mimetype="image/png",
+        headers={"Content-Disposition": 'attachment; filename="arbol_de_nodos.png"'},
+    )
+
+
 @app.get("/")
 def index():
     html = f"""<!doctype html>
@@ -1035,6 +1072,7 @@ def index():
       <div class="legend-row">
         <a class="dl" href="/export/rutas.csv" download title="Exportar rutas (ida/vuelta)">&#8595; rutas</a>
         <a class="dl" href="/export/nodes.csv" download title="Exportar nodos">&#8595; nodos</a>
+        <a class="dl" href="/export/mapa.png" download title="Exportar mapa como plano PNG (A3)">&#8595; exportar a PNG</a>
       </div>
       <div class="legend-row" style="flex-wrap:wrap; row-gap:6px;">
         <div class="node-dot root"></div><span>raiz</span>
