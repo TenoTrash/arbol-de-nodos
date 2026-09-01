@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-# arbol-de-nodos — v0.8
+# arbol-de-nodos — v0.9.1
 #
 # Muestra la topologia del mesh como GRAFO DE FUERZAS (no arbol estricto),
 # con raiz anclada al borde izquierdo. Se abandono d3.stratify()/d3.tree()
@@ -488,6 +488,11 @@ def on_receive(packet: dict, interface):
     )
     increment_packet_count(from_id)
 
+    # Destello visual en el frontend: evento liviano, separado de
+    # "tree_update" (que es para cambios de topologia/metricas completos).
+    # Se dispara por CUALQUIER paquete, no solo traceroute.
+    socketio.emit("packet_flash", {"node_id": from_id})
+
     # ── Atajo "direct": 0 saltos = vecino directo de la raiz. Asumimos
     # simetria en este caso puntual (adyacencia fisica de RF), a diferencia
     # de rutas multi-hop donde ida/vuelta si pueden diferir de verdad ──────
@@ -920,6 +925,7 @@ def index():
       --bad:      #ef4444;
       --route-fwd:  #38bdf8;
       --route-back: #fb923c;
+      --flash:    #67ea94;
       --mono:     "JetBrains Mono", "Fira Code", ui-monospace, monospace;
       --sans:     "Inter", system-ui, sans-serif;
     }}
@@ -933,18 +939,49 @@ def index():
     #tree-wrap:active {{ cursor: grabbing; }}
     #tree-svg  {{ width: 100%; height: 100%; display: block; }}
 
-    .link-fwd  {{ stroke: var(--route-fwd);  stroke-width: 1.8px; opacity: .85; }}
-    .link-back {{ stroke: var(--route-back); stroke-width: 1.8px; opacity: .85; stroke-dasharray: 4 3; }}
+    .link-fwd  {{ stroke: var(--route-fwd);  stroke-width: 1.8px; opacity: .35;
+                  transition: opacity .2s ease, stroke-width .2s ease, filter .3s ease; }}
+    .link-back {{ stroke: var(--route-back); stroke-width: 1.8px; opacity: .35; stroke-dasharray: 4 3;
+                  transition: opacity .2s ease, stroke-width .2s ease, filter .3s ease; }}
     .link-fwd.highlight, .link-back.highlight {{ stroke-width: 4.5px; opacity: 1; }}
     .link-fwd.dimmed, .link-back.dimmed {{ opacity: .1; }}
+    /* Paquete recibido de un nodo con esta ruta resuelta: destello neon
+       verde meshtastic recorriendo la ruta, igual que en el nodo (ver
+       flashNode()/refreshFlash()). Independiente del esquema hover/seleccion
+       (.highlight, arriba) — !important para que se note incluso si la ruta
+       esta de fondo "dimmed" por el hover de otro nodo en ese momento. */
+    .link-fwd.flash, .link-back.flash {{
+      stroke: var(--flash) !important; stroke-width: 4.5px !important; opacity: 1 !important;
+      animation: flash-pulse-line 1s ease-in-out infinite;
+    }}
 
-    .node rect.main {{ stroke: var(--bg); stroke-width: 2px; }}
+    .node rect.main {{ stroke: var(--bg); stroke-width: 2px;
+                        transition: fill .25s ease, stroke .25s ease, filter .3s ease; }}
     .node rect.pending-ring {{ fill: none; stroke: var(--pending-ring); stroke-width: 1.6px; stroke-dasharray: 3 2; }}
     .node text   {{ fill: var(--bg); font-size: 10px; font-weight: 600; font-family: var(--sans);
                     pointer-events: none; }}
     .node text.root-label {{ font-weight: 700; font-size: 11px; }}
     .node.highlight rect.main {{ stroke: var(--accent); stroke-width: 3px; }}
     .node.dimmed {{ opacity: .2; }}
+    /* Paquete recibido de este nodo: destello neon verde meshtastic por 3s
+       (ver flashNode()/refreshFlash() en el JS). Prioridad sobre el color
+       de rol, incluso con "highlight"/"dimmed" activos a la vez. El glow es
+       drop-shadow apilado (mismo --flash, sin inventar otro tono) mas un
+       pulso sutil — es lo que da el efecto "neon" sin salirse de la paleta. */
+    .node.flash rect.main {{
+      fill: var(--flash) !important; stroke: var(--flash);
+      animation: flash-pulse-node 1s ease-in-out infinite;
+    }}
+    .node.flash {{ opacity: 1 !important; }}
+
+    @keyframes flash-pulse-node {{
+      0%, 100% {{ filter: drop-shadow(0 0 2px var(--flash)) drop-shadow(0 0 6px var(--flash)); }}
+      50%      {{ filter: drop-shadow(0 0 5px var(--flash)) drop-shadow(0 0 16px var(--flash)) drop-shadow(0 0 26px var(--flash)); }}
+    }}
+    @keyframes flash-pulse-line {{
+      0%, 100% {{ filter: drop-shadow(0 0 2px var(--flash)) drop-shadow(0 0 5px var(--flash)); }}
+      50%      {{ filter: drop-shadow(0 0 4px var(--flash)) drop-shadow(0 0 12px var(--flash)); }}
+    }}
 
     #tooltip {{
       position: absolute; pointer-events: none; z-index: 10;
@@ -1028,6 +1065,16 @@ def index():
             style="position:absolute;right:12px;bottom:48px;font-size:12px;color:var(--text);
                    background:var(--surface);border:1px solid var(--border);border-radius:6px;
                    padding:6px 12px;cursor:pointer;font-family:var(--sans);">&#8635; Rotar 90&deg;</button>
+    <div style="position:absolute;right:12px;bottom:84px;display:flex;flex-direction:column;
+                border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+      <button id="zoom-in-btn" title="Acercar"
+              style="font-size:14px;font-weight:700;color:var(--text);background:var(--surface);
+                     border:none;border-bottom:1px solid var(--border);width:32px;height:28px;
+                     cursor:pointer;font-family:var(--sans);">+</button>
+      <button id="zoom-out-btn" title="Alejar"
+              style="font-size:14px;font-weight:700;color:var(--text);background:var(--surface);
+                     border:none;width:32px;height:28px;cursor:pointer;font-family:var(--sans);">&minus;</button>
+    </div>
     <div id="neighbor-panel" style="position:absolute;top:12px;right:12px;width:250px;max-height:60vh;
          overflow-y:auto;font-size:12px;color:var(--text);background:var(--surface);
          border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:none;
@@ -1225,9 +1272,9 @@ function ensureSim() {{
   // pase lo que pase con las fuerzas. Esto permite togglear "orientation"
   // sin tener que reconstruir la simulacion.
   sim = d3.forceSimulation()
-    .force("link", d3.forceLink().id(d => d.node_id).distance(75).strength(0.35))
-    .force("charge", d3.forceManyBody().strength(-220))
-    .force("collide", d3.forceCollide().radius(d => nodeRectWidth(d) / 2 + 6))
+    .force("link", d3.forceLink().id(d => d.node_id).distance(95).strength(0.35))
+    .force("charge", d3.forceManyBody().strength(-320))
+    .force("collide", d3.forceCollide().radius(d => nodeRectWidth(d) / 2 + 16).strength(0.9))
     .force("crossY", d3.forceY(d => d._targetCross ?? treeWrapSize().h / 2).strength(0.28))
     .force("crossX", d3.forceX(d => d._targetCross ?? treeWrapSize().w / 2).strength(0.28))
     .alphaDecay(0.03)
@@ -1455,7 +1502,7 @@ function mergeData(nodesArr, routesArr, status) {{
     const depth = dmap.get(n.node_id) ?? 0;
     // Coordenada FIJA (no una fuerza blanda): esto es lo que hace la
     // posicion por profundidad obligatoria, no solo "preferida".
-    const fixedDepth = Math.min(70 + depth * 95, depthLimit - 60);
+    const fixedDepth = Math.min(70 + depth * 130, depthLimit - 60);
 
     let obj = nodeById.get(n.node_id);
     if (!obj) {{
@@ -1539,7 +1586,11 @@ function mergeData(nodesArr, routesArr, status) {{
     [...newNodeIds].some(id => !prevSimNodeIds.has(id)) ||
     [...newLinkKeys].some(k => !prevSimLinkKeys.has(k));
   if (topologyChanged) {{
-    s.alpha(0.15).restart();
+    // La primera carga (nada previo) trae potencialmente decenas de nodos
+    // de una — necesita un impulso fuerte para desparramarse bien con el
+    // espaciado nuevo. Una actualizacion incremental (un nodo nuevo entre
+    // los que ya estaban asentados) solo necesita un empujon suave.
+    s.alpha(prevSimNodeIds.size === 0 ? 1 : 0.15).restart();
   }}
   prevSimNodeIds = newNodeIds;
   prevSimLinkKeys = newLinkKeys;
@@ -1552,6 +1603,56 @@ let linkSel = null, nodeSel = null;
 
 let hoverNodeIds = new Set();
 let hoverLinkKeys = new Set();
+
+// ── Destello "paquete recibido" ──────────────────────────────────────────
+// flashTimers guarda el setTimeout de cada nodo: si llega OTRO paquete del
+// mismo nodo antes de que se cumplan los 3s, se reinicia el temporizador en
+// vez de acumular (el destello dura 3s desde el ULTIMO paquete, no 3s fijos
+// desde el primero).
+const flashNodeIds = new Set();
+const flashTimers = new Map();
+// Links: cada segmento ida/vuelta tiene su PROPIO temporizador (no uno por
+// nodo) porque un mismo tramo cerca de la raiz puede pertenecer a la ruta
+// de varios nodos a la vez — si dos nodos distintos "tocan" ese tramo, tiene
+// que seguir iluminado mientras cualquiera de los dos siga dentro de sus 3s,
+// no apagarse cuando vence el primero que llego.
+const flashLinkIds = new Set();
+const flashLinkTimers = new Map();
+const FLASH_MS = 3000;
+
+function flashNode(nodeId) {{
+  flashNodeIds.add(nodeId);
+  if (flashTimers.has(nodeId)) clearTimeout(flashTimers.get(nodeId));
+  flashTimers.set(nodeId, setTimeout(() => {{
+    flashNodeIds.delete(nodeId);
+    flashTimers.delete(nodeId);
+    refreshFlash();
+  }}, FLASH_MS));
+
+  // Ruta (ida y vuelta) de este nodo hacia la raiz, si esta resuelta —
+  // mismo recorrido que ya usa el hover (chainFor), asi que "existe" para
+  // el destello exactamente cuando existiria para el resaltado por mouse.
+  for (const dir of ["fwd", "back"]) {{
+    const {{ seq }} = chainFor(nodeId, dir);
+    for (let i = 0; i < seq.length - 1; i++) {{
+      const key = dir + ":" + seq[i];
+      flashLinkIds.add(key);
+      if (flashLinkTimers.has(key)) clearTimeout(flashLinkTimers.get(key));
+      flashLinkTimers.set(key, setTimeout(() => {{
+        flashLinkIds.delete(key);
+        flashLinkTimers.delete(key);
+        refreshFlash();
+      }}, FLASH_MS));
+    }}
+  }}
+
+  refreshFlash();
+}}
+
+function refreshFlash() {{
+  if (nodeSel) nodeSel.classed("flash", d => flashNodeIds.has(d.node_id));
+  if (linkSel) linkSel.classed("flash", d => flashLinkIds.has(d.key));
+}}
 
 // Camina la cadena de "next_hop" en una direccion hasta llegar a la raiz
 // (o hasta que se corte por falta de dato). Devuelve la secuencia de
@@ -1695,7 +1796,7 @@ function ticked() {{
   const horiz = orientation === "horizontal";
   const depthLimit = horiz ? w : h;
   for (const d of simNodes) {{
-    const minDepth = d.is_root ? 70 : Math.min(70 + (d._depth ?? 5) * 95, depthLimit - 60);
+    const minDepth = d.is_root ? 70 : Math.min(70 + (d._depth ?? 5) * 130, depthLimit - 60);
     if (horiz) {{
       if (d.x < minDepth) {{ d.x = minDepth; if (d.vx < 0) d.vx = 0; }}
     }} else {{
@@ -1754,6 +1855,7 @@ function ticked() {{
     .text(d => nodeLabelText(d));
 
   refreshHighlight();
+  refreshFlash();
 
   if (!didInitialCenter && simNodes.length) {{
     didInitialCenter = true;
@@ -2059,6 +2161,13 @@ function toggleOrientation() {{
   }}
 }}
 rotateBtn.addEventListener("click", toggleOrientation);
+
+document.getElementById("zoom-in-btn").addEventListener("click", () => {{
+  svg.transition().duration(200).call(zoom.scaleBy, 1.3);
+}});
+document.getElementById("zoom-out-btn").addEventListener("click", () => {{
+  svg.transition().duration(200).call(zoom.scaleBy, 1 / 1.3);
+}});
 document.getElementById("node-search").addEventListener("input", (ev) => {{
   searchQuery = ev.target.value;
   renderList(lastNodesArr, lastStatus);
@@ -2073,6 +2182,7 @@ function applyPayload(payload) {{
 
 const socket = io();
 socket.on("tree_update", applyPayload);
+socket.on("packet_flash", (payload) => {{ if (payload && payload.node_id) flashNode(payload.node_id); }});
 
 async function poll() {{
   try {{
