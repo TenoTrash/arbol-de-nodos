@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-# arbol-de-nodos — v0.9.2
+# arbol-de-nodos — v0.9.1.9
 #
 # Muestra la topologia del mesh como GRAFO DE FUERZAS (no arbol estricto),
 # con raiz anclada al borde izquierdo. Se abandono d3.stratify()/d3.tree()
@@ -1024,6 +1024,14 @@ def index():
     #rotate-btn:hover {{ border-color: var(--text); color: #fff; }}
     #node-search:focus {{ border-color: var(--accent); }}
 
+    /* ── Selector de vista (grafo / radial) ── */
+    .viewmode-bar {{ display:flex; gap:4px; }}
+    .viewmode-btn {{ font-size:12px; color:var(--text); background:var(--surface);
+                      border:1px solid var(--border); border-radius:6px; padding:6px 12px;
+                      cursor:pointer; font-family:var(--sans); }}
+    .viewmode-btn:hover {{ border-color: var(--text); color: #fff; }}
+    .viewmode-btn.active {{ background: var(--accent); border-color: var(--accent); color: #fff; }}
+
     .tsb-item {{ display: flex; flex-direction: column; gap: 4px; }}
     .tsb-label {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }}
     .tsb-value {{ font-size: 15px; font-weight: 700; color: #fff; font-family: var(--mono); }}
@@ -1057,10 +1065,17 @@ def index():
     <div id="fun-stats" style="position:absolute;left:12px;bottom:44px;font-size:11px;color:var(--text);
          background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;
          display:none;line-height:1.7;max-width:270px;font-family:var(--mono);"></div>
-    <button id="fit-all-btn" title="Encuadrar todo el grafo"
-            style="position:absolute;right:12px;bottom:12px;font-size:12px;color:var(--text);
-                   background:var(--surface);border:1px solid var(--border);border-radius:6px;
-                   padding:6px 12px;cursor:pointer;font-family:var(--sans);">&#10021; Encuadrar todo</button>
+    <div id="bottom-right-bar" style="position:absolute;right:12px;bottom:12px;display:flex;
+         align-items:center;gap:8px;">
+      <div class="viewmode-bar">
+        <button class="viewmode-btn" data-mode="tree" title="Arbol de fuerzas (raiz a un lado)">Árbol</button>
+        <button class="viewmode-btn" data-mode="radial" title="Raiz en el centro, anillos concentricos por cantidad de saltos">Radial</button>
+      </div>
+      <button id="fit-all-btn" title="Encuadrar todo el grafo"
+              style="font-size:12px;color:var(--text);
+                     background:var(--surface);border:1px solid var(--border);border-radius:6px;
+                     padding:6px 12px;cursor:pointer;font-family:var(--sans);">&#10021; Encuadrar todo</button>
+    </div>
     <button id="rotate-btn" title="Rotar el arbol 90 grados (raiz a la izquierda) / volver a la vista original (raiz arriba)"
             style="position:absolute;right:12px;bottom:48px;font-size:12px;color:var(--text);
                    background:var(--surface);border:1px solid var(--border);border-radius:6px;
@@ -1079,9 +1094,10 @@ def index():
          overflow-y:auto;font-size:12px;color:var(--text);background:var(--surface);
          border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:none;
          font-family:var(--mono);"></div>
-    <div id="top-stats-bar" style="position:absolute;top:12px;left:12px;width:fit-content;max-width:calc(100% - 286px);
+    <div id="top-stats-bar" style="position:absolute;top:12px;left:12px;width:230px;
+         max-height:calc(100% - 24px);overflow-y:auto;
          background:var(--surface);border:1px solid var(--border);border-radius:8px;
-         padding:12px 30px 8px 16px;display:none;flex-wrap:wrap;gap:22px;align-items:center;z-index:4;"></div>
+         padding:14px 22px 14px 16px;display:none;flex-direction:column;gap:16px;align-items:stretch;z-index:4;"></div>
     <button id="tsb-reopen-btn" title="Mostrar estadísticas"
             style="position:absolute;top:12px;left:12px;font-size:11px;color:var(--muted);
                    background:var(--surface);border:1px solid var(--border);border-radius:6px;
@@ -1239,6 +1255,19 @@ let lastNodesArr = [];
 // profundidad y cual queda libre siguiendo al padre. Ver mergeData().
 let orientation = "vertical";
 
+// Vista activa: "tree" (grafo de fuerzas de siempre, con orientation
+// horizontal/vertical de arriba) o "radial" (raiz fija en el centro, anillos
+// concentricos por hop_index — mismo motor de fuerzas que "tree" pero
+// fijando radio en vez de un eje cartesiano). Ver setViewMode().
+let viewMode = "tree";
+const RADIAL_STEP = 110;   // px por salto de profundidad en la vista radial
+
+// Centro y "esta activo" del modo radial, actualizado en cada mergeData().
+// Lo lee forceAngularSpacing() (ver ensureSim) para saber si tiene que
+// hacer algo este tick y alrededor de que punto — no tiene sentido pasarlo
+// como parametro porque d3 llama a las fuerzas sin argumentos propios.
+let radialCenter = {{ cx: 0, cy: 0, active: false }};
+
 function treeWrapSize() {{
   const el = document.getElementById("tree-wrap");
   return {{ w: el.clientWidth || 800, h: el.clientHeight || 600 }};
@@ -1253,6 +1282,52 @@ function depthMap(nodesArr, routesArr) {{
     if (cur === undefined || v < cur) d.set(r.node_id, v);
   }}
   return d;
+}}
+
+// Ajuste liviano de la vista radial: sin esto, el angulo de cada nodo
+// dentro de su anillo (misma profundidad) lo decide casi enteramente
+// charge+link, que tienden a amontonar a los hijos cerca del angulo de su
+// padre — el anillo termina viendose como un arco apretado de un lado en
+// vez de una circunferencia pareja. Esta fuerza separa tangencialmente a
+// los vecinos de un mismo anillo que quedan muy juntos en angulo, sin
+// tocar su radio (eso lo sigue fijando forceRadial). No hace nada fuera
+// del modo "radial" — se apaga sola via radialCenter.active.
+function forceAngularSpacing(strength) {{
+  let nodes = [];
+  function force(alpha) {{
+    if (!radialCenter.active) return;
+    const cx = radialCenter.cx, cy = radialCenter.cy;
+    const rings = new Map();
+    for (const n of nodes) {{
+      if (n.is_root || !n._targetRadius) continue;
+      if (!rings.has(n._depth)) rings.set(n._depth, []);
+      rings.get(n._depth).push(n);
+    }}
+    for (const list of rings.values()) {{
+      if (list.length < 2) continue;
+      const r = list[0]._targetRadius;
+      // Angulo minimo entre vecinos de anillo para no pisarse, en funcion
+      // del ancho del nodo y cuanto arco (en px) representa un radian a
+      // ese radio — mas lejos del centro, un mismo angulo separa mas.
+      const minGap = Math.min(0.6, (nodeRectWidth(list[0]) + 24) / r);
+      for (const n of list) n._angle = Math.atan2(n.y - cy, n.x - cx);
+      list.sort((a, b) => a._angle - b._angle);
+      for (let i = 0; i < list.length; i++) {{
+        const a = list[i], b = list[(i + 1) % list.length];
+        let gap = b._angle - a._angle;
+        if (gap <= 0) gap += Math.PI * 2;
+        const overlap = minGap - gap;
+        if (overlap <= 0) continue;
+        const push = overlap * r * strength * alpha;
+        a.vx -= Math.sin(a._angle) * push;
+        a.vy += Math.cos(a._angle) * push;
+        b.vx += Math.sin(b._angle) * push;
+        b.vy -= Math.cos(b._angle) * push;
+      }}
+    }}
+  }}
+  force.initialize = (_nodes) => {{ nodes = _nodes; }};
+  return force;
 }}
 
 function ensureSim() {{
@@ -1284,6 +1359,7 @@ function ensureSim() {{
     .force("collide", d3.forceCollide().radius(d => nodeRectWidth(d) / 2 + 16).strength(0.9))
     .force("crossY", d3.forceY(d => d._targetCross ?? treeWrapSize().h / 2).strength(0.28))
     .force("crossX", d3.forceX(d => d._targetCross ?? treeWrapSize().w / 2).strength(0.28))
+    .force("angular", forceAngularSpacing(0.3))
     .alphaDecay(0.03)
     .on("tick", ticked);
   return sim;
@@ -1478,20 +1554,36 @@ function buildNeighborMap(routesArr) {{
 }}
 let neighborMapCache = new Map();
 
+function updateOrphanBadge(orphanCount) {{
+  const badge = document.getElementById("orphan-badge");
+  if (orphanCount > 0) {{
+    badge.style.display = "block";
+    badge.textContent = `+${{orphanCount}} nodos sin ruta resuelta (ver lista)`;
+  }} else {{
+    badge.style.display = "none";
+  }}
+}}
+
 function mergeData(nodesArr, routesArr, status) {{
   lastRoutes = routesArr;
   lastStatus = status;
   lastNodesArr = nodesArr;
   neighborMapCache = buildNeighborMap(routesArr);
 
-  const {{ w, h }} = treeWrapSize();
   const dmap = depthMap(nodesArr, routesArr);
+  const {{ w, h }} = treeWrapSize();
   const seen = new Set();
   let orphanCount = 0;
+  const isRadial = viewMode === "radial";
+  const cx = w / 2, cy = h / 2;
+  radialCenter.cx = cx;
+  radialCenter.cy = cy;
+  radialCenter.active = isRadial;
 
   // Segun orientacion: "horizontal" fija X por profundidad (raiz izquierda,
   // libre en Y); "vertical" fija Y por profundidad (raiz arriba, libre en
   // X). depthLimit/crossCenter se calculan sobre el eje que corresponda.
+  // Ninguno de los dos aplica en modo "radial" (ver mas abajo).
   const horiz = orientation === "horizontal";
   const depthLimit = horiz ? w : h;
   const crossCenter = horiz ? h / 2 : w / 2;
@@ -1507,6 +1599,38 @@ function mergeData(nodesArr, routesArr, status) {{
 
     seen.add(n.node_id);
     const depth = dmap.get(n.node_id) ?? 0;
+
+    if (isRadial) {{
+      // Radio FIJO por profundidad (forceRadial, ver mas abajo) — el
+      // angulo queda libre, autoorganizado por charge+link+collide, igual
+      // que en los ejemplos clasicos de "radial tree" de d3. La raiz queda
+      // clavada en el centro con fx/fy.
+      const targetRadius = depth * RADIAL_STEP;
+      let obj = nodeById.get(n.node_id);
+      if (!obj) {{
+        // Nodo nuevo: arranca en el angulo actual de su padre (si ya lo
+        // conocemos) mas un poco de dispersion — evita que aparezca del
+        // otro lado del circulo y tenga que "viajar" toda la vuelta.
+        const parentId = n.is_root ? null : preferredParentId(n.node_id);
+        const parentObj = parentId ? nodeById.get(parentId) : null;
+        const angle = parentObj
+          ? Math.atan2(parentObj.y - cy, parentObj.x - cx) + (Math.random() - 0.5) * 0.6
+          : Math.random() * Math.PI * 2;
+        obj = {{ ...n }};
+        obj.x = n.is_root ? cx : cx + targetRadius * Math.cos(angle);
+        obj.y = n.is_root ? cy : cy + targetRadius * Math.sin(angle);
+        if (n.is_root) {{ obj.fx = cx; obj.fy = cy; }}
+        nodeById.set(n.node_id, obj);
+      }} else {{
+        Object.assign(obj, n);
+        if (n.is_root) {{ obj.fx = cx; obj.fy = cy; }}
+        else {{ obj.fx = undefined; obj.fy = undefined; }}
+      }}
+      obj._targetRadius = targetRadius;
+      obj._depth = depth;
+      continue;
+    }}
+
     // Coordenada FIJA (no una fuerza blanda): esto es lo que hace la
     // posicion por profundidad obligatoria, no solo "preferida".
     const fixedDepth = Math.min(70 + depth * 130, depthLimit - 60);
@@ -1547,27 +1671,23 @@ function mergeData(nodesArr, routesArr, status) {{
 
   // Segunda pasada: ahora que todos los objetos existen, calcular hacia
   // donde tira la fuerza del eje libre de cada uno (la posicion actual del
-  // padre en ese eje).
-  for (const n of nodesArr) {{
-    if (n.is_root || !seen.has(n.node_id)) continue;
-    const obj = nodeById.get(n.node_id);
-    const parentId = preferredParentId(n.node_id);
-    const parentObj = parentId ? nodeById.get(parentId) : null;
-    obj._targetCross = parentObj ? (horiz ? parentObj.y : parentObj.x) : crossCenter;
+  // padre en ese eje). No aplica en modo radial: ahi el angulo lo maneja
+  // el propio motor de fuerzas (charge+link), no una fuerza dedicada.
+  if (!isRadial) {{
+    for (const n of nodesArr) {{
+      if (n.is_root || !seen.has(n.node_id)) continue;
+      const obj = nodeById.get(n.node_id);
+      const parentId = preferredParentId(n.node_id);
+      const parentObj = parentId ? nodeById.get(parentId) : null;
+      obj._targetCross = parentObj ? (horiz ? parentObj.y : parentObj.x) : crossCenter;
+    }}
   }}
 
   for (const id of [...nodeById.keys()]) {{
     if (!seen.has(id)) nodeById.delete(id);
   }}
 
-  const badge = document.getElementById("orphan-badge");
-  if (orphanCount > 0) {{
-    badge.style.display = "block";
-    badge.textContent = `+${{orphanCount}} nodos sin ruta resuelta (ver lista)`;
-  }} else {{
-    badge.style.display = "none";
-  }}
-
+  updateOrphanBadge(orphanCount);
   renderFunStats(nodesArr, routesArr);
   renderTopStatsBar(nodesArr, routesArr);
 
@@ -1577,6 +1697,17 @@ function mergeData(nodesArr, routesArr, status) {{
     .map(r => ({{ source: r.node_id, target: r.next_hop, direction: r.direction, key: r.direction + ":" + r.node_id }}));
 
   const s = ensureSim();
+  // Fuerzas mutuamente excluyentes segun la vista: "radial" fija el radio
+  // (forceRadial) y suelta el eje cartesiano libre; "tree" hace lo opuesto
+  // (crossX/crossY, ver ensureSim). Redefinir el force() con null lo quita
+  // de la simulacion sin tener que reconstruirla entera.
+  s.force("radial", isRadial ? d3.forceRadial(d => d._targetRadius ?? 0, cx, cy).strength(1) : null);
+  s.force("crossX", isRadial ? null : d3.forceX(d => d._targetCross ?? treeWrapSize().w / 2).strength(0.28));
+  s.force("crossY", isRadial ? null : d3.forceY(d => d._targetCross ?? treeWrapSize().h / 2).strength(0.28));
+  // El link force tiraba siempre a 95px, pero en radial el salto real entre
+  // anillos es RADIAL_STEP (110px) — esa diferencia tironeaba a los nodos
+  // un poco adentro/afuera de su radio exacto. Igualarlo saca esa tension.
+  s.force("link").distance(isRadial ? RADIAL_STEP : 95);
   s.nodes(simNodes);
   s.force("link").links(simLinks);
 
@@ -1799,15 +1930,21 @@ function ticked() {{
   // fuerza fx/fy ya empuja hacia ahi, pero esto es lo que convierte
   // "tiende a" en "no puede no". Se cancela la velocidad negativa para no
   // generar temblor por el choque entre el clamp y la simulacion.
-  const {{ w, h }} = treeWrapSize();
-  const horiz = orientation === "horizontal";
-  const depthLimit = horiz ? w : h;
-  for (const d of simNodes) {{
-    const minDepth = d.is_root ? 70 : Math.min(70 + (d._depth ?? 5) * 130, depthLimit - 60);
-    if (horiz) {{
-      if (d.x < minDepth) {{ d.x = minDepth; if (d.vx < 0) d.vx = 0; }}
-    }} else {{
-      if (d.y < minDepth) {{ d.y = minDepth; if (d.vy < 0) d.vy = 0; }}
+  // Este clamp asume el modelo cartesiano de "tree" (eje de profundidad
+  // fijo = X o Y segun orientation). En "radial" la distancia a la raiz ya
+  // la impone forceRadial (mergeData) como fuerza, no como clamp duro, asi
+  // que no corresponde tocar x/y aca con esta logica.
+  if (viewMode === "tree") {{
+    const {{ w, h }} = treeWrapSize();
+    const horiz = orientation === "horizontal";
+    const depthLimit = horiz ? w : h;
+    for (const d of simNodes) {{
+      const minDepth = d.is_root ? 70 : Math.min(70 + (d._depth ?? 5) * 130, depthLimit - 60);
+      if (horiz) {{
+        if (d.x < minDepth) {{ d.x = minDepth; if (d.vx < 0) d.vx = 0; }}
+      }} else {{
+        if (d.y < minDepth) {{ d.y = minDepth; if (d.vy < 0) d.vy = 0; }}
+      }}
     }}
   }}
 
@@ -2178,6 +2315,36 @@ function toggleOrientation() {{
 }}
 rotateBtn.addEventListener("click", toggleOrientation);
 updateRotateBtnLabel();
+
+// ─── Selector de vista: grafo (tree) / radial ───────────────────────────────
+// "Rotar" (horizontal/vertical) no aplica a "radial" (no hay eje fijo que
+// rotar, el radio ya lo determina la profundidad), asi que solo se muestra
+// en "tree".
+function updateViewModeButtons() {{
+  document.querySelectorAll(".viewmode-btn").forEach(btn => {{
+    btn.classList.toggle("active", btn.dataset.mode === viewMode);
+  }});
+}}
+
+function setViewMode(mode) {{
+  if (viewMode === mode) return;
+  viewMode = mode;
+  updateViewModeButtons();
+  rotateBtn.style.display = mode === "tree" ? "block" : "none";
+  hideNeighborPanel();
+
+  if (lastNodesArr.length) mergeData(lastNodesArr, lastRoutes, lastStatus);
+
+  // Cambiar de eje fijo (tree) a radio fijo (radial), o viceversa, es un
+  // reacomodo tan grande como una carga inicial — necesita el mismo impulso
+  // fuerte que el "reheat" de topologyChanged en mergeData().
+  if (sim) sim.alpha(0.9).restart();
+  setTimeout(() => fitAll(0.85), 400);
+}}
+document.querySelectorAll(".viewmode-btn").forEach(btn => {{
+  btn.addEventListener("click", () => setViewMode(btn.dataset.mode));
+}});
+updateViewModeButtons();
 
 document.getElementById("zoom-in-btn").addEventListener("click", () => {{
   svg.transition().duration(200).call(zoom.scaleBy, 1.3);
