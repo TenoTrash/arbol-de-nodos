@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-# arbol-de-nodos — v0.9.1
+# arbol-de-nodos — v0.9.2
 #
 # Muestra la topologia del mesh como GRAFO DE FUERZAS (no arbol estricto),
 # con raiz anclada al borde izquierdo. Se abandono d3.stratify()/d3.tree()
@@ -939,9 +939,9 @@ def index():
     #tree-wrap:active {{ cursor: grabbing; }}
     #tree-svg  {{ width: 100%; height: 100%; display: block; }}
 
-    .link-fwd  {{ stroke: var(--route-fwd);  stroke-width: 1.8px; opacity: .35;
+    .link-fwd  {{ stroke: var(--route-fwd);  stroke-width: 1.8px; opacity: .18;
                   transition: opacity .2s ease, stroke-width .2s ease, filter .3s ease; }}
-    .link-back {{ stroke: var(--route-back); stroke-width: 1.8px; opacity: .35; stroke-dasharray: 4 3;
+    .link-back {{ stroke: var(--route-back); stroke-width: 1.8px; opacity: .18; stroke-dasharray: 4 3;
                   transition: opacity .2s ease, stroke-width .2s ease, filter .3s ease; }}
     .link-fwd.highlight, .link-back.highlight {{ stroke-width: 4.5px; opacity: 1; }}
     .link-fwd.dimmed, .link-back.dimmed {{ opacity: .1; }}
@@ -1061,7 +1061,7 @@ def index():
             style="position:absolute;right:12px;bottom:12px;font-size:12px;color:var(--text);
                    background:var(--surface);border:1px solid var(--border);border-radius:6px;
                    padding:6px 12px;cursor:pointer;font-family:var(--sans);">&#10021; Encuadrar todo</button>
-    <button id="rotate-btn" title="Rotar el arbol 90 grados (raiz arriba) / volver a la vista original"
+    <button id="rotate-btn" title="Rotar el arbol 90 grados (raiz a la izquierda) / volver a la vista original (raiz arriba)"
             style="position:absolute;right:12px;bottom:48px;font-size:12px;color:var(--text);
                    background:var(--surface);border:1px solid var(--border);border-radius:6px;
                    padding:6px 12px;cursor:pointer;font-family:var(--sans);">&#8635; Rotar 90&deg;</button>
@@ -1206,7 +1206,14 @@ const svg = d3.select("#tree-svg");
 const g   = svg.append("g");
 const linksLayer = g.append("g").attr("class", "links-layer");
 const nodesLayer = g.append("g").attr("class", "nodes-layer");
-const zoom = d3.zoom().scaleExtent([0.2, 3]).on("zoom", (ev) => g.attr("transform", ev.transform));
+// El piso 0.03 (en vez de 0.2) es a proposito muy bajo: "encuadrar todo"
+// (fitAll) necesita poder alejarse tanto como haga falta para que el arbol
+// completo entre en pantalla, sin importar que tan sprawled quede con
+// muchos nodos/niveles de profundidad — si el piso del zoom interactivo es
+// mas alto que la escala que fitAll necesita, el encuadre queda cortado Y
+// ademas el usuario no puede compensar alejandose a mano, porque ya esta en
+// el limite. Ver fitAll() mas abajo.
+const zoom = d3.zoom().scaleExtent([0.03, 3]).on("zoom", (ev) => g.attr("transform", ev.transform));
 svg.call(zoom);
 
 let didInitialCenter = false;
@@ -1230,7 +1237,7 @@ let lastNodesArr = [];
 // arriba, la profundidad crece hacia abajo (eje Y fijo, eje X libre) — es
 // el mismo layout de fuerzas, solo se intercambia cual eje queda fijo por
 // profundidad y cual queda libre siguiendo al padre. Ver mergeData().
-let orientation = "horizontal";
+let orientation = "vertical";
 
 function treeWrapSize() {{
   const el = document.getElementById("tree-wrap");
@@ -1859,9 +1866,13 @@ function ticked() {{
 
   if (!didInitialCenter && simNodes.length) {{
     didInitialCenter = true;
-    const tx = orientation === "horizontal" ? 40 : 0;
-    const ty = orientation === "horizontal" ? 0 : 40;
-    svg.call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(1));
+    // La primera carga arranca con un reheat fuerte (alpha 1, ver mergeData)
+    // asi que los nodos todavia estan bastante lejos de su posicion final
+    // en este primer tick — encuadrar ya mismo daria un bounding box
+    // equivocado. Se espera a que la simulacion asiente antes de encuadrar,
+    // igual que ya hace toggleOrientation() tras rotar (ahi alcanza con
+    // menos porque parte de un alpha mas bajo).
+    setTimeout(() => fitAll(0.9), 900);
   }}
 }}
 
@@ -2135,20 +2146,25 @@ function fitAll(zoomFactor = 1) {{
   const pad = 50;
   const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
   const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
-  const scale = Math.min(3, Math.max(0.2, Math.min(w / (maxX - minX || 1), h / (maxY - minY || 1)))) * zoomFactor;
+  // Sin piso propio: que achique lo que haga falta para que entre todo (el
+  // piso real es scaleExtent, arriba) — solo se limita el techo para no
+  // acercar de mas un arbol chico.
+  const scale = Math.min(3, w / (maxX - minX || 1), h / (maxY - minY || 1)) * zoomFactor;
   const midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
   const transform = d3.zoomIdentity.translate(w / 2 - midX * scale, h / 2 - midY * scale).scale(scale);
   svg.transition().duration(500).call(zoom.transform, transform);
 }}
 document.getElementById("fit-all-btn").addEventListener("click", fitAll);
 
-// Alterna entre el layout horizontal (raiz a la izquierda, por defecto) y
-// vertical (raiz arriba, arbol rotado 90 grados). Reusa mergeData() sobre
+// Alterna entre el layout vertical (raiz arriba, por defecto) y horizontal
+// (raiz a la izquierda). Reusa mergeData() sobre
 // los ultimos datos conocidos para reasignar fx/fy de todos los nodos ya
 // existentes al nuevo eje, y deja que la simulacion los reacomode.
 const rotateBtn = document.getElementById("rotate-btn");
 function updateRotateBtnLabel() {{
-  rotateBtn.innerHTML = orientation === "horizontal"
+  // "vertical" es ahora el layout por defecto ("vista original"), asi que
+  // el label invita a rotar cuando estamos ahi y a volver cuando no.
+  rotateBtn.innerHTML = orientation === "vertical"
     ? "&#8635; Rotar 90&deg;"
     : "&#8634; Vista original";
 }}
@@ -2161,6 +2177,7 @@ function toggleOrientation() {{
   }}
 }}
 rotateBtn.addEventListener("click", toggleOrientation);
+updateRotateBtnLabel();
 
 document.getElementById("zoom-in-btn").addEventListener("click", () => {{
   svg.transition().duration(200).call(zoom.scaleBy, 1.3);
