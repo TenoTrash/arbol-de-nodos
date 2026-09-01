@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-# arbol-de-nodos — v0.2
+# arbol-de-nodos — v0.8
 #
 # Muestra la topologia del mesh como GRAFO DE FUERZAS (no arbol estricto),
 # con raiz anclada al borde izquierdo. Se abandono d3.stratify()/d3.tree()
@@ -1172,6 +1172,8 @@ const nodeById = new Map();
 let simNodes = [];
 let simLinks = [];
 let sim = null;
+let prevSimNodeIds = new Set();
+let prevSimLinkKeys = new Set();
 let lastRoutes = [];
 let lastStatus = {{}};
 let lastNodesArr = [];
@@ -1523,7 +1525,24 @@ function mergeData(nodesArr, routesArr, status) {{
   const s = ensureSim();
   s.nodes(simNodes);
   s.force("link").links(simLinks);
-  s.alpha(0.5).restart();
+
+  // Recalentar la simulacion (y que el grafo "respire") solo tiene sentido
+  // cuando cambio la TOPOLOGIA (nodo o ruta nueva/desaparecida) — un paquete
+  // que solo actualiza metricas (rssi/snr/packet_count/last_heard) de nodos
+  // ya conocidos no debe sacudir el layout entero. Si nada estructural
+  // cambio, se deja la simulacion como esta (en reposo si ya se asento).
+  const newNodeIds = new Set(simNodes.map(n => n.node_id));
+  const newLinkKeys = new Set(simLinks.map(l => l.key));
+  const topologyChanged =
+    newNodeIds.size !== prevSimNodeIds.size ||
+    newLinkKeys.size !== prevSimLinkKeys.size ||
+    [...newNodeIds].some(id => !prevSimNodeIds.has(id)) ||
+    [...newLinkKeys].some(k => !prevSimLinkKeys.has(k));
+  if (topologyChanged) {{
+    s.alpha(0.15).restart();
+  }}
+  prevSimNodeIds = newNodeIds;
+  prevSimLinkKeys = newLinkKeys;
 
   updateStatus(status);
   renderList(nodesArr, status);
